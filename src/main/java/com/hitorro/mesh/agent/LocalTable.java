@@ -5,6 +5,7 @@ package com.hitorro.mesh.agent;
 
 import com.hitorro.jsontypesystem.JVS;
 import com.hitorro.jsontypesystem.Type;
+import com.hitorro.jvssql.config.StreamConfig;
 
 import java.util.Iterator;
 
@@ -33,4 +34,19 @@ public interface LocalTable {
      * the agent MUST return a new iterator each time; a task consumed once cannot be replayed.
      */
     Iterator<JVS> openScan();
+
+    /**
+     * Phase 6d.1 — jvssql {@link StreamConfig} for this table. Return
+     * non-null to declare this table a streaming source; the agent will
+     * register it with jvssql as {@code registerStream(name, iter, type, streamConfig)}
+     * so windowed aggregates auto-swap to the incremental
+     * {@code StreamingAggregate} executor and rows emit as watermarks
+     * advance instead of at end-of-scan.
+     *
+     * <p>Default {@code null} → batch behaviour, unchanged from earlier
+     * phases. Streaming {@code LocalTable} impls (e.g.
+     * {@link InMemoryStreamingTable}, Kafka / NATS adapters) override
+     * this to supply their event-time field.</p>
+     */
+    default StreamConfig streamConfig() { return null; }
 }

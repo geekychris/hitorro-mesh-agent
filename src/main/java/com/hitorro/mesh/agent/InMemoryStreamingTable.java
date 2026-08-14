@@ -6,6 +6,7 @@ package com.hitorro.mesh.agent;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.hitorro.jsontypesystem.JVS;
 import com.hitorro.jsontypesystem.Type;
+import com.hitorro.jvssql.config.StreamConfig;
 
 import java.util.Iterator;
 import java.util.NoSuchElementException;
@@ -50,12 +51,43 @@ public final class InMemoryStreamingTable implements LocalTable {
     private final String name;
     private final Type type;
     private final String partitionKey;
+    private final StreamConfig streamConfig;   // nullable — null = batch (phase 6a behaviour)
     private final LinkedBlockingQueue<JVS> queue = new LinkedBlockingQueue<>();
 
     public InMemoryStreamingTable(String name, Type type, String partitionKey) {
+        this(name, type, partitionKey, null);
+    }
+
+    /**
+     * Phase 6d.1 — construct a streaming source with an event-time field.
+     * jvssql auto-swaps to the incremental {@code StreamingAggregate}
+     * executor for windowed aggregates over this table; windows flush as
+     * the watermark (derived from {@code eventTimeField} observations)
+     * advances past each window's close time.
+     *
+     * @param eventTimeField JVS dotted path to the event-time field (e.g.
+     *                       {@code "event_time"} or {@code "meta.ts"});
+     *                       null falls back to batch semantics
+     * @param allowedLatenessMillis how long a window may stay open after
+     *                              its close time to accept late-arriving
+     *                              rows; 0 for strict close-on-watermark
+     */
+    public InMemoryStreamingTable(String name, Type type, String partitionKey,
+                                  String eventTimeField, long allowedLatenessMillis) {
+        this(name, type, partitionKey,
+                eventTimeField == null ? null
+                        : StreamConfig.builder()
+                                .eventTimeField(eventTimeField)
+                                .allowedLatenessMillis(allowedLatenessMillis)
+                                .build());
+    }
+
+    /** Direct-config overload for callers that want to tune all StreamConfig knobs. */
+    public InMemoryStreamingTable(String name, Type type, String partitionKey, StreamConfig streamConfig) {
         this.name = name;
         this.type = type;
         this.partitionKey = partitionKey;
+        this.streamConfig = streamConfig;
     }
 
     /**
@@ -79,6 +111,7 @@ public final class InMemoryStreamingTable implements LocalTable {
     @Override public String name() { return name; }
     @Override public Type type() { return type; }
     @Override public String partitionKey() { return partitionKey; }
+    @Override public StreamConfig streamConfig() { return streamConfig; }
 
     @Override
     public Iterator<JVS> openScan() {

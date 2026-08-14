@@ -140,8 +140,7 @@ final class TaskExecutor implements AutoCloseable {
 
     private void runScanPlain(TaskDescriptor task) {
         LocalTable local = requireLocalTable(task);
-        JvsSqlEngine engine = engineWithBroadcasts()
-                .registerStream(task.sourceTable(), local.openScan(), local.type())
+        JvsSqlEngine engine = registerLocalSource(engineWithBroadcasts(), local, task.sourceTable())
                 .build();
         PreparedQuery q = engine.compile(task.sqlPlan());
         long seq = 0;
@@ -163,8 +162,7 @@ final class TaskExecutor implements AutoCloseable {
         List<String> keyCols = spec.keyColumns();
         int buckets = spec.buckets();
 
-        JvsSqlEngine engine = engineWithBroadcasts()
-                .registerStream(task.sourceTable(), local.openScan(), local.type())
+        JvsSqlEngine engine = registerLocalSource(engineWithBroadcasts(), local, task.sourceTable())
                 .build();
         PreparedQuery q = engine.compile(task.sqlPlan());
 
@@ -397,7 +395,26 @@ final class TaskExecutor implements AutoCloseable {
     private JvsSqlEngine.Builder engineWithBroadcasts() {
         JvsSqlEngine.Builder b = JvsSqlEngine.builder();
         for (LocalTable bt : config.broadcastTables()) {
-            b.registerStream(bt.name(), bt.openScan(), bt.type());
+            registerLocalSource(b, bt, bt.name());
+        }
+        return b;
+    }
+
+    /**
+     * Register the source under the requested alias, respecting the table's
+     * {@link LocalTable#streamConfig()}. For a streaming source (non-null
+     * StreamConfig with an event-time field), jvssql auto-swaps to the
+     * incremental {@code StreamingAggregate} executor on windowed aggregates —
+     * windows emit as watermarks advance instead of at end-of-scan. Phase 6d.1.
+     */
+    private static JvsSqlEngine.Builder registerLocalSource(JvsSqlEngine.Builder b,
+                                                            LocalTable local,
+                                                            String alias) {
+        com.hitorro.jvssql.config.StreamConfig sc = local.streamConfig();
+        if (sc != null && sc.isStreaming()) {
+            b.registerStream(alias, local.openScan(), local.type(), sc);
+        } else {
+            b.registerStream(alias, local.openScan(), local.type());
         }
         return b;
     }
