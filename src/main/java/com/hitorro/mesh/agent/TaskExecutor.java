@@ -83,7 +83,19 @@ final class TaskExecutor implements AutoCloseable {
                     t.setDaemon(true);
                     return t;
                 });
+        // Phase 6d.2.1 — small shared scheduler for periodic WATERMARK
+        // heartbeats on streaming scan tasks. Sized 1 because heartbeats
+        // are cheap (single publish per fire), and short (200ms interval).
+        this.watermarkScheduler = Executors.newScheduledThreadPool(1, r -> {
+            Thread t = new Thread(r, "mesh-agent-wm-" + config.agentId());
+            t.setDaemon(true);
+            return t;
+        });
     }
+
+    private final java.util.concurrent.ScheduledExecutorService watermarkScheduler;
+    /** How often streaming scan tasks publish WATERMARK heartbeats. */
+    static final long WATERMARK_INTERVAL_MS = 200L;
 
     void submit(TaskDescriptor task) {
         java.util.concurrent.Future<?> f = workers.submit(() -> runOne(task));
@@ -140,18 +152,49 @@ final class TaskExecutor implements AutoCloseable {
 
     private void runScanPlain(TaskDescriptor task) {
         LocalTable local = requireLocalTable(task);
-        JvsSqlEngine engine = registerLocalSource(engineWithBroadcasts(), local, task.sourceTable())
-                .build();
-        PreparedQuery q = engine.compile(task.sqlPlan());
-        long seq = 0;
-        Iterator<JsonNode> rows = q.asIterator();
-        while (rows.hasNext()) {
-            JsonNode row = rows.next();
-            transport.publish(task.resultSubject(),
-                    Codecs.encode(ResultMessage.row(task.taskId(), task.partitionKey(), row, seq++)));
+        JvsSqlEngine.Builder builder = engineWithBroadcasts();
+
+        // Phase 6d.2.1: for a streaming source, wrap the scan iterator with
+        // a watermark tracker so a background thread can publish WATERMARK
+        // heartbeats even when the query isn't emitting rows. Fixes the
+        // idle-partition stall in phase-6d.2 multi-partition combines.
+        com.hitorro.jvssql.config.StreamConfig sc = local.streamConfig();
+        WatermarkTracker tracker = null;
+        Iterator<JVS> scan = local.openScan();
+        if (sc != null && sc.isStreaming()) {
+            tracker = new WatermarkTracker(sc.eventTimeField());
+            scan = tracker.wrap(scan);
+            builder.registerStream(task.sourceTable(), scan, local.type(), sc);
+        } else {
+            builder.registerStream(task.sourceTable(), scan, local.type());
         }
-        transport.publish(task.resultSubject(),
-                Codecs.encode(ResultMessage.eos(task.taskId(), task.partitionKey(), seq)));
+        JvsSqlEngine engine = builder.build();
+        PreparedQuery q = engine.compile(task.sqlPlan());
+
+        java.util.concurrent.ScheduledFuture<?> hb = null;
+        if (tracker != null) {
+            final WatermarkTracker t = tracker;
+            hb = watermarkScheduler.scheduleAtFixedRate(() -> {
+                long wm = t.current();
+                if (wm > Long.MIN_VALUE) {
+                    transport.publish(task.resultSubject(),
+                            Codecs.encode(ResultMessage.watermark(task.taskId(), task.partitionKey(), wm)));
+                }
+            }, WATERMARK_INTERVAL_MS, WATERMARK_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        }
+        try {
+            long seq = 0;
+            Iterator<JsonNode> rows = q.asIterator();
+            while (rows.hasNext()) {
+                JsonNode row = rows.next();
+                transport.publish(task.resultSubject(),
+                        Codecs.encode(ResultMessage.row(task.taskId(), task.partitionKey(), row, seq++)));
+            }
+            transport.publish(task.resultSubject(),
+                    Codecs.encode(ResultMessage.eos(task.taskId(), task.partitionKey(), seq)));
+        } finally {
+            if (hb != null) hb.cancel(false);
+        }
     }
 
     // -- shape 2: stage-0 scan with shuffle sink ------------------------------
@@ -438,5 +481,6 @@ final class TaskExecutor implements AutoCloseable {
     @Override
     public void close() {
         workers.shutdownNow();
+        watermarkScheduler.shutdownNow();
     }
 }
