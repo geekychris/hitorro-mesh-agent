@@ -188,7 +188,7 @@ final class TaskExecutor implements AutoCloseable {
 
     private void runScanPlain(TaskDescriptor task) {
         LocalTable local = requireLocalTable(task);
-        JvsSqlEngine.Builder builder = engineWithBroadcasts();
+        JvsSqlEngine.Builder builder = engineWithBroadcasts(task.sourceTable());
 
         // Phase 6d.2.1: for a streaming source, wrap the scan iterator with
         // a watermark tracker so a background thread can publish WATERMARK
@@ -247,7 +247,7 @@ final class TaskExecutor implements AutoCloseable {
         List<String> keyCols = spec.keyColumns();
         int buckets = spec.buckets();
 
-        JvsSqlEngine engine = registerLocalSource(engineWithBroadcasts(), local, task.sourceTable())
+        JvsSqlEngine engine = registerLocalSource(engineWithBroadcasts(task.sourceTable()), local, task.sourceTable())
                 .build();
         PreparedQuery q = engine.compile(task.sqlPlan());
 
@@ -478,13 +478,28 @@ final class TaskExecutor implements AutoCloseable {
      * when broadcast tables are tiny — the cost is a few extra Calcite schema
      * entries per query. If a broadcast table's data is large we'd need a
      * cheaper strategy (lazy registration, or a shared engine cache).</p>
+     *
+     * @param excludeName if non-null, skip registering any broadcast table
+     *                    whose name equals this — the caller will register
+     *                    a partition-scoped source under the same name.
+     *                    Prevents "table already registered" Calcite errors
+     *                    when a dataset is both a broadcast dimension AND a
+     *                    distributed-single-partition FROM target (as the
+     *                    hitorro-mesh-datasets Autoregistrar's dual
+     *                    registration produces).
      */
-    private JvsSqlEngine.Builder engineWithBroadcasts() {
+    private JvsSqlEngine.Builder engineWithBroadcasts(String excludeName) {
         JvsSqlEngine.Builder b = JvsSqlEngine.builder();
         for (LocalTable bt : config.broadcastTables()) {
+            if (excludeName != null && excludeName.equals(bt.name())) continue;
             registerLocalSource(b, bt, bt.name());
         }
         return b;
+    }
+
+    /** Back-compat overload — no exclusion, matches original signature. */
+    private JvsSqlEngine.Builder engineWithBroadcasts() {
+        return engineWithBroadcasts(null);
     }
 
     /**
