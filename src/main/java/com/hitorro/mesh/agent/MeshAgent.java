@@ -27,6 +27,14 @@ public final class MeshAgent implements AutoCloseable {
     private final MeshTransport transport;
     private final AgentConfig config;
     private final AtomicLong activeTasks = new AtomicLong();
+    /** Phase 7m — lifetime counters exposed via {@link #tasksRunCount()},
+     *  {@link #rowsEmittedCount()}, {@link #tasksErroredCount()},
+     *  {@link #watermarksEmittedCount()}. TaskExecutor bumps them on task
+     *  lifecycle events; app-side Micrometer wires them into Prometheus. */
+    private final AtomicLong tasksRun = new AtomicLong();
+    private final AtomicLong rowsEmitted = new AtomicLong();
+    private final AtomicLong tasksErrored = new AtomicLong();
+    private final AtomicLong watermarksEmitted = new AtomicLong();
     private final HeartbeatPublisher heartbeat;
     private final TaskExecutor executor;
     private MeshTransport.Subscription taskSub;
@@ -39,7 +47,8 @@ public final class MeshAgent implements AutoCloseable {
                 config.agentId(), config.capabilities(), System.currentTimeMillis());
         this.heartbeat = new HeartbeatPublisher(
                 transport, desc, config.heartbeatInterval().toMillis(), activeTasks);
-        this.executor = new TaskExecutor(transport, config, activeTasks);
+        this.executor = new TaskExecutor(transport, config, activeTasks,
+                tasksRun, rowsEmitted, tasksErrored, watermarksEmitted);
     }
 
     public void start() {
@@ -58,6 +67,17 @@ public final class MeshAgent implements AutoCloseable {
     }
 
     public String agentId() { return config.agentId(); }
+
+    /** Currently in-flight task count. Phase 7m. */
+    public long activeTaskCount() { return activeTasks.get(); }
+    /** Cumulative tasks accepted (submitted to the worker pool) since start. */
+    public long tasksRunCount() { return tasksRun.get(); }
+    /** Cumulative result rows this agent has published (across all tasks). */
+    public long rowsEmittedCount() { return rowsEmitted.get(); }
+    /** Cumulative tasks that finished by publishing an ERROR ResultMessage. */
+    public long tasksErroredCount() { return tasksErrored.get(); }
+    /** Cumulative WATERMARK heartbeats published by streaming scan tasks. */
+    public long watermarksEmittedCount() { return watermarksEmitted.get(); }
 
     @Override
     public void close() {

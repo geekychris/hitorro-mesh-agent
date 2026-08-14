@@ -60,6 +60,11 @@ final class TaskExecutor implements AutoCloseable {
     private final MeshTransport transport;
     private final AgentConfig config;
     private final AtomicLong activeTasks;
+    // Phase 7m — lifetime counters (MeshAgent-owned; TaskExecutor bumps).
+    private final AtomicLong tasksRun;
+    private final AtomicLong rowsEmitted;
+    private final AtomicLong tasksErrored;
+    private final AtomicLong watermarksEmitted;
     private final java.util.concurrent.ExecutorService workers;
     /**
      * queryId → Futures for every task running under that query. Populated
@@ -72,10 +77,22 @@ final class TaskExecutor implements AutoCloseable {
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.List<java.util.concurrent.Future<?>>>
             activeByQuery = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** Back-compat overload for callers (tests) that don't wire lifetime counters. */
     TaskExecutor(MeshTransport transport, AgentConfig config, AtomicLong activeTasks) {
+        this(transport, config, activeTasks,
+                new AtomicLong(), new AtomicLong(), new AtomicLong(), new AtomicLong());
+    }
+
+    TaskExecutor(MeshTransport transport, AgentConfig config, AtomicLong activeTasks,
+                 AtomicLong tasksRun, AtomicLong rowsEmitted,
+                 AtomicLong tasksErrored, AtomicLong watermarksEmitted) {
         this.transport = transport;
         this.config = config;
         this.activeTasks = activeTasks;
+        this.tasksRun = tasksRun;
+        this.rowsEmitted = rowsEmitted;
+        this.tasksErrored = tasksErrored;
+        this.watermarksEmitted = watermarksEmitted;
         this.workers = Executors.newFixedThreadPool(
                 Math.max(4, Runtime.getRuntime().availableProcessors() * 2),
                 r -> {
@@ -139,6 +156,7 @@ final class TaskExecutor implements AutoCloseable {
 
     private void runOne(TaskDescriptor task) {
         activeTasks.incrementAndGet();
+        tasksRun.incrementAndGet();   // phase 7m
         try {
             if (task.combineSpec() != null) {
                 runCombine(task);
@@ -199,6 +217,7 @@ final class TaskExecutor implements AutoCloseable {
                 // still returns MIN_VALUE and we skip publishing.
                 long wm = t.currentWithIdle();
                 if (wm > Long.MIN_VALUE) {
+                    watermarksEmitted.incrementAndGet();   // phase 7m
                     transport.publish(task.resultSubject(),
                             Codecs.encode(ResultMessage.watermark(task.taskId(), task.partitionKey(), wm)));
                 }
@@ -209,6 +228,7 @@ final class TaskExecutor implements AutoCloseable {
             Iterator<JsonNode> rows = q.asIterator();
             while (rows.hasNext()) {
                 JsonNode row = rows.next();
+                rowsEmitted.incrementAndGet();   // phase 7m
                 transport.publish(task.resultSubject(),
                         Codecs.encode(ResultMessage.row(task.taskId(), task.partitionKey(), row, seq++)));
             }
@@ -236,6 +256,7 @@ final class TaskExecutor implements AutoCloseable {
         Iterator<JsonNode> rows = q.asIterator();
         while (rows.hasNext()) {
             JsonNode row = rows.next();
+            rowsEmitted.incrementAndGet();   // phase 7m
             int b = bucketFor(row, keyCols, buckets);
             transport.publish(spec.subjectFor(b),
                     Codecs.encode(ResultMessage.row(task.taskId(), task.partitionKey(), row, seq[b]++)));
@@ -325,6 +346,7 @@ final class TaskExecutor implements AutoCloseable {
             Iterator<JsonNode> out = q.asIterator();
             while (out.hasNext()) {
                 JsonNode row = out.next();
+                rowsEmitted.incrementAndGet();   // phase 7m
                 transport.publish(task.resultSubject(),
                         Codecs.encode(ResultMessage.row(task.taskId(),
                                 task.taskId(),
@@ -496,6 +518,7 @@ final class TaskExecutor implements AutoCloseable {
     }
 
     private void publishError(TaskDescriptor task, String msg) {
+        tasksErrored.incrementAndGet();   // phase 7m
         transport.publish(task.resultSubject(),
                 Codecs.encode(ResultMessage.error(task.taskId(), task.partitionKey(), msg)));
     }
