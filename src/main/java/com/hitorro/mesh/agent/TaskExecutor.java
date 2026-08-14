@@ -97,6 +97,24 @@ final class TaskExecutor implements AutoCloseable {
     /** How often streaming scan tasks publish WATERMARK heartbeats. */
     static final long WATERMARK_INTERVAL_MS = 200L;
 
+    /**
+     * How long a streaming partition may stay silent before its watermark
+     * starts advancing on wall-clock (phase 6d.2.2). Configurable via
+     * {@code -Dhitorro.mesh.watermark.idle-timeout-ms}. Default: 30s
+     * (long enough that momentary quiescence doesn't drift watermarks
+     * incorrectly, short enough that truly-idle partitions unblock global
+     * window emission within a reasonable window). Set to
+     * {@link Long#MAX_VALUE} to disable — useful for backfill scenarios
+     * where event-time isn't aligned with wall-clock.
+     */
+    static long watermarkIdleTimeoutMs() {
+        try {
+            return Long.parseLong(System.getProperty("hitorro.mesh.watermark.idle-timeout-ms", "30000"));
+        } catch (NumberFormatException e) {
+            return 30_000L;
+        }
+    }
+
     void submit(TaskDescriptor task) {
         java.util.concurrent.Future<?> f = workers.submit(() -> runOne(task));
         activeByQuery.computeIfAbsent(task.queryId(),
@@ -162,7 +180,7 @@ final class TaskExecutor implements AutoCloseable {
         WatermarkTracker tracker = null;
         Iterator<JVS> scan = local.openScan();
         if (sc != null && sc.isStreaming()) {
-            tracker = new WatermarkTracker(sc.eventTimeField());
+            tracker = new WatermarkTracker(sc.eventTimeField(), watermarkIdleTimeoutMs());
             scan = tracker.wrap(scan);
             builder.registerStream(task.sourceTable(), scan, local.type(), sc);
         } else {
@@ -175,7 +193,11 @@ final class TaskExecutor implements AutoCloseable {
         if (tracker != null) {
             final WatermarkTracker t = tracker;
             hb = watermarkScheduler.scheduleAtFixedRate(() -> {
-                long wm = t.current();
+                // Phase 6d.2.2 — currentWithIdle() folds idle-timeout logic
+                // into the returned watermark. For a fresh tracker that hasn't
+                // observed anything and hasn't been idle long enough yet, this
+                // still returns MIN_VALUE and we skip publishing.
+                long wm = t.currentWithIdle();
                 if (wm > Long.MIN_VALUE) {
                     transport.publish(task.resultSubject(),
                             Codecs.encode(ResultMessage.watermark(task.taskId(), task.partitionKey(), wm)));

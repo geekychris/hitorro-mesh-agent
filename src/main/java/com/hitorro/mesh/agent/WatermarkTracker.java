@@ -31,15 +31,58 @@ import java.util.concurrent.atomic.AtomicLong;
 final class WatermarkTracker {
 
     private final String eventTimeField;
+    private final long idleTimeoutMs;
+    private final long createdSystemMs = System.currentTimeMillis();
     private final AtomicLong max = new AtomicLong(Long.MIN_VALUE);
+    private volatile long lastObservationSystemMs = 0L;
 
     WatermarkTracker(String eventTimeField) {
+        this(eventTimeField, Long.MAX_VALUE);   // idle-timeout disabled by default
+    }
+
+    WatermarkTracker(String eventTimeField, long idleTimeoutMs) {
         this.eventTimeField = eventTimeField;
+        this.idleTimeoutMs = idleTimeoutMs;
     }
 
     /** Highest observed event-time, or {@link Long#MIN_VALUE} if no rows yet. */
     long current() {
         return max.get();
+    }
+
+    /**
+     * Phase 6d.2.2 — watermark with idle-timeout advancement. If no events
+     * have been observed within {@code idleTimeoutMs}, the watermark
+     * advances based on wall-clock elapsed time (assuming event-time
+     * flows roughly at real-time rate). This unblocks global window
+     * closure for partitions that are quiet for extended periods.
+     *
+     * <p>Rules:</p>
+     * <ul>
+     *   <li>If we've observed at least one event AND idle > timeout →
+     *       advance by (idleMs - timeout) beyond the observed max.</li>
+     *   <li>If we've observed nothing AND time-since-creation > timeout →
+     *       use {@code system_now - timeout} as the watermark.</li>
+     *   <li>Otherwise → return {@link #current()}.</li>
+     * </ul>
+     *
+     * <p><b>Caveat:</b> assumes event-time is roughly aligned with wall-clock
+     * (real-time streams). For backfill / historical replay where event-time
+     * is arbitrary, set {@code idleTimeoutMs} very large or leave at the
+     * default {@link Long#MAX_VALUE} to disable this mechanism.</p>
+     */
+    long currentWithIdle() {
+        long observed = max.get();
+        long now = System.currentTimeMillis();
+        if (observed == Long.MIN_VALUE) {
+            long elapsed = now - createdSystemMs;
+            return elapsed > idleTimeoutMs ? now - idleTimeoutMs : Long.MIN_VALUE;
+        }
+        long idle = now - lastObservationSystemMs;
+        if (idle > idleTimeoutMs) {
+            return observed + (idle - idleTimeoutMs);
+        }
+        return observed;
     }
 
     /** Wrap the upstream iterator so every row observed advances the tracker. */
@@ -65,8 +108,9 @@ final class WatermarkTracker {
         // Monotonic update — CAS loop keeps the highest value.
         while (true) {
             long cur = max.get();
-            if (v <= cur) return;
-            if (max.compareAndSet(cur, v)) return;
+            if (v <= cur) break;
+            if (max.compareAndSet(cur, v)) break;
         }
+        lastObservationSystemMs = System.currentTimeMillis();
     }
 }
