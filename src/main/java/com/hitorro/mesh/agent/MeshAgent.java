@@ -27,6 +27,8 @@ public final class MeshAgent implements AutoCloseable {
     private final MeshTransport transport;
     private final AgentConfig config;
     private final RuntimeTableRegistry runtimeTables = new RuntimeTableRegistry();
+    private final java.util.Set<String> runtimeCapabilities =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final AtomicLong activeTasks = new AtomicLong();
     /** Phase 7m — lifetime counters exposed via {@link #tasksRunCount()},
      *  {@link #rowsEmittedCount()}, {@link #tasksErroredCount()},
@@ -44,10 +46,18 @@ public final class MeshAgent implements AutoCloseable {
     public MeshAgent(MeshTransport transport, AgentConfig config) {
         this.transport = transport;
         this.config = config;
-        AgentDescriptor desc = new AgentDescriptor(
-                config.agentId(), config.capabilities(), System.currentTimeMillis());
+        long startedAt = System.currentTimeMillis();
+        // Descriptor supplier — every heartbeat tick sees the CURRENT
+        // merged capability set (boot-time config + runtime additions).
+        // Lets the agent advertise partition:<name>:<key> capabilities
+        // that it picked up via RegisterTableMessage without a restart.
+        java.util.function.Supplier<AgentDescriptor> descSupplier = () -> {
+            java.util.Set<String> merged = new java.util.LinkedHashSet<>(config.capabilities());
+            merged.addAll(runtimeCapabilities);
+            return new AgentDescriptor(config.agentId(), merged, startedAt);
+        };
         this.heartbeat = new HeartbeatPublisher(
-                transport, desc, config.heartbeatInterval().toMillis(), activeTasks);
+                transport, descSupplier, config.heartbeatInterval().toMillis(), activeTasks);
         this.executor = new TaskExecutor(transport, config, runtimeTables, activeTasks,
                 tasksRun, rowsEmitted, tasksErrored, watermarksEmitted);
     }
@@ -82,6 +92,29 @@ public final class MeshAgent implements AutoCloseable {
      * can see it.
      */
     public RuntimeTableRegistry runtimeTables() { return runtimeTables; }
+
+    /**
+     * Add a runtime capability (e.g. {@code partition:my_table:na}) that
+     * shows up in the NEXT heartbeat. Used by the app-side installer
+     * after it installs a partition — the driver's dispatcher then
+     * routes matching queries to this agent based on the fresh
+     * capability. Idempotent.
+     */
+    public void addRuntimeCapability(String cap) {
+        if (cap != null && !cap.isBlank()) runtimeCapabilities.add(cap);
+    }
+
+    /** Symmetric to {@link #addRuntimeCapability} — drops the cap so
+     *  it stops appearing in subsequent heartbeats. Idempotent. */
+    public void removeRuntimeCapability(String cap) {
+        if (cap != null) runtimeCapabilities.remove(cap);
+    }
+
+    /** Snapshot of the current runtime-added capability set (for tests
+     *  and diagnostics). */
+    public java.util.Set<String> runtimeCapabilities() {
+        return java.util.Set.copyOf(runtimeCapabilities);
+    }
 
     /** Exposed so the app-side handler can subscribe to
      *  {@code mesh.agent.control.>} without re-plumbing the transport. */
