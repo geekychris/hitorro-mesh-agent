@@ -68,6 +68,9 @@ public final class MeshAgent implements AutoCloseable {
     }
 
     public String agentId() { return config.agentId(); }
+    /** Exposed so app-side components (inventory responder etc.) can
+     *  read boot-time table sets without re-plumbing AgentConfig. */
+    public AgentConfig config() { return config; }
 
     /**
      * Registry of tables added at runtime via
