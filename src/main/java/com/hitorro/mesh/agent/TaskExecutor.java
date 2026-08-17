@@ -59,6 +59,10 @@ final class TaskExecutor implements AutoCloseable {
 
     private final MeshTransport transport;
     private final AgentConfig config;
+    /** Optional — tables added at runtime via RegisterTableMessage. Checked
+     *  first in {@link #requireLocalTable} + {@link #engineWithBroadcasts}
+     *  so runtime entries shadow boot-time entries of the same name. */
+    private final RuntimeTableRegistry runtimeTables;
     private final AtomicLong activeTasks;
     // Phase 7m — lifetime counters (MeshAgent-owned; TaskExecutor bumps).
     private final AtomicLong tasksRun;
@@ -86,8 +90,18 @@ final class TaskExecutor implements AutoCloseable {
     TaskExecutor(MeshTransport transport, AgentConfig config, AtomicLong activeTasks,
                  AtomicLong tasksRun, AtomicLong rowsEmitted,
                  AtomicLong tasksErrored, AtomicLong watermarksEmitted) {
+        this(transport, config, null, activeTasks,
+                tasksRun, rowsEmitted, tasksErrored, watermarksEmitted);
+    }
+
+    TaskExecutor(MeshTransport transport, AgentConfig config,
+                 RuntimeTableRegistry runtimeTables,
+                 AtomicLong activeTasks,
+                 AtomicLong tasksRun, AtomicLong rowsEmitted,
+                 AtomicLong tasksErrored, AtomicLong watermarksEmitted) {
         this.transport = transport;
         this.config = config;
+        this.runtimeTables = runtimeTables;
         this.activeTasks = activeTasks;
         this.tasksRun = tasksRun;
         this.rowsEmitted = rowsEmitted;
@@ -490,8 +504,19 @@ final class TaskExecutor implements AutoCloseable {
      */
     private JvsSqlEngine.Builder engineWithBroadcasts(String excludeName) {
         JvsSqlEngine.Builder b = JvsSqlEngine.builder();
+        // Runtime broadcasts first so a runtime entry with the same name
+        // shadows the boot-time one — dev-loop convenience.
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        if (runtimeTables != null) {
+            for (LocalTable bt : runtimeTables.broadcastSnapshot()) {
+                if (excludeName != null && excludeName.equals(bt.name())) continue;
+                registerLocalSource(b, bt, bt.name());
+                seen.add(bt.name());
+            }
+        }
         for (LocalTable bt : config.broadcastTables()) {
             if (excludeName != null && excludeName.equals(bt.name())) continue;
+            if (seen.contains(bt.name())) continue;   // runtime already registered
             registerLocalSource(b, bt, bt.name());
         }
         return b;
@@ -522,6 +547,12 @@ final class TaskExecutor implements AutoCloseable {
     }
 
     private LocalTable requireLocalTable(TaskDescriptor task) {
+        // Runtime registry first — a hot-registered table replaces any
+        // boot-time entry of the same (name, partitionKey).
+        if (runtimeTables != null) {
+            LocalTable rt = runtimeTables.find(task.sourceTable(), task.partitionKey());
+            if (rt != null) return rt;
+        }
         for (LocalTable lt : config.localTables()) {
             if (!lt.name().equals(task.sourceTable())) continue;
             String pk = lt.partitionKey();

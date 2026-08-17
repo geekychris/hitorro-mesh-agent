@@ -26,6 +26,7 @@ public final class MeshAgent implements AutoCloseable {
 
     private final MeshTransport transport;
     private final AgentConfig config;
+    private final RuntimeTableRegistry runtimeTables = new RuntimeTableRegistry();
     private final AtomicLong activeTasks = new AtomicLong();
     /** Phase 7m — lifetime counters exposed via {@link #tasksRunCount()},
      *  {@link #rowsEmittedCount()}, {@link #tasksErroredCount()},
@@ -47,7 +48,7 @@ public final class MeshAgent implements AutoCloseable {
                 config.agentId(), config.capabilities(), System.currentTimeMillis());
         this.heartbeat = new HeartbeatPublisher(
                 transport, desc, config.heartbeatInterval().toMillis(), activeTasks);
-        this.executor = new TaskExecutor(transport, config, activeTasks,
+        this.executor = new TaskExecutor(transport, config, runtimeTables, activeTasks,
                 tasksRun, rowsEmitted, tasksErrored, watermarksEmitted);
     }
 
@@ -67,6 +68,21 @@ public final class MeshAgent implements AutoCloseable {
     }
 
     public String agentId() { return config.agentId(); }
+
+    /**
+     * Registry of tables added at runtime via
+     * {@link com.hitorro.mesh.RegisterTableMessage}. The app-side owns
+     * the control-subject subscription (because building a concrete
+     * {@code LocalTable} needs {@code NdjsonLocalTable} /
+     * {@code ParquetLocalTable} which live in {@code hitorro-mesh-agent-app}).
+     * MeshAgent just holds the registry so {@link TaskExecutor}'s lookup
+     * can see it.
+     */
+    public RuntimeTableRegistry runtimeTables() { return runtimeTables; }
+
+    /** Exposed so the app-side handler can subscribe to
+     *  {@code mesh.agent.control.>} without re-plumbing the transport. */
+    public MeshTransport transport() { return transport; }
 
     /** Currently in-flight task count. Phase 7m. */
     public long activeTaskCount() { return activeTasks.get(); }
