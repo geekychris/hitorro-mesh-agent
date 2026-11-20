@@ -3,11 +3,12 @@
  */
 package com.hitorro.mesh.agent;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 import com.hitorro.jsontypesystem.JVS;
 
 import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicLong;
+import com.hitorro.util.json.JsonValues;
 
 /**
  * Phase 6d.2.1 — observes {@code event_time} on rows flowing through a
@@ -104,7 +105,7 @@ final class WatermarkTracker {
         if (node == null) return;
         JsonNode f = node.get(eventTimeField);
         if (f == null || !f.isNumber()) return;
-        long v = f.asLong();
+        long v = JsonValues.asLong(f);
         // Monotonic update — CAS loop keeps the highest value.
         while (true) {
             long cur = max.get();

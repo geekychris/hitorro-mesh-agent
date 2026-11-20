@@ -3,8 +3,9 @@
  */
 package com.hitorro.mesh.agent;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import com.hitorro.util.json.JsonMappers;
 import com.hitorro.jsontypesystem.JVS;
 import com.hitorro.jsontypesystem.Type;
 import com.hitorro.jvssql.JvsSqlEngine;
@@ -25,6 +26,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import com.hitorro.util.json.JsonValues;
 
 /**
  * Runs a {@link TaskDescriptor}. Three shapes (chosen by task.stage +
@@ -55,7 +57,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 final class TaskExecutor implements AutoCloseable {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = JsonMappers.json();
 
     private final MeshTransport transport;
     private final AgentConfig config;
@@ -437,7 +439,7 @@ final class TaskExecutor implements AutoCloseable {
             if (i > 0) sb.append('\0');
             JsonNode v = row == null ? null : row.get(keyColumns.get(i));
             if (v == null || v.isNull()) sb.append("\0__NULL__\0");
-            else sb.append(v.asText());
+            else sb.append(JsonValues.asText(v));
         }
         return Math.floorMod(sb.toString().hashCode(), buckets);
     }
@@ -457,7 +459,7 @@ final class TaskExecutor implements AutoCloseable {
         } else {
             JsonNode first = sample.get(0);
             boolean firstField = true;
-            for (Iterator<String> it = first.fieldNames(); it.hasNext(); ) {
+            for (Iterator<String> it = first.propertyNames().iterator(); it.hasNext(); ) {
                 String name = it.next();
                 if (!firstField) json.append(",");
                 firstField = false;
