@@ -3,7 +3,8 @@
  */
 package com.hitorro.mesh.agent;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
+import com.hitorro.util.json.JsonMappers;
 import com.hitorro.jsontypesystem.JVS;
 import org.junit.jupiter.api.Test;
 
@@ -25,7 +26,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class WatermarkTrackerTest {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = JsonMappers.json();
 
     private static JVS row(long eventTime) throws Exception {
         return new JVS(MAPPER.readTree("{\"event_time\":" + eventTime + "}"));
